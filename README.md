@@ -45,9 +45,6 @@ kubectl create -f https://github.com/kubevirt/containerized-data-importer/releas
 kubectl create -f https://github.com/kubevirt/containerized-data-importer/releases/download/$VERSION/cdi-cr.yaml
 ```
 
-## install CSI driver
-#### I am using rook-ceph for CSI and storageClass
-
 ## 6. Install VolumeSnapshot CRDs
 ```bash
 kubectl api-resources | grep volumesnapshot
