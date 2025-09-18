@@ -1,16 +1,43 @@
-# KubeVirt-VolumeSnapshot
+# KubeVirt VM Snapshot with Rook-Ceph
 
-## install KubeVirt
+## 1. Prerequisites
+- Kubernetes cluster running
+- Rook-Ceph installed (providing RBD/FS storage)
+- kubectl installed
+  
+## 2. Install KubeVirt
 ```bash
 # Deploy KubeVirt
 export KUBEVIRT_VERSION=$(curl -s https://storage.googleapis.com/kubevirt-prow/release/kubevirt/kubevirt/stable.txt)
 echo $KUBEVIRT_VERSION
 kubectl create -f "https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}/kubevirt-operator.yaml"
-
 kubectl create -f "https://github.com/kubevirt/kubevirt/releases/download/${KUBEVIRT_VERSION}/kubevirt-cr.yaml"
 ```
 
-## install CDI
+## 3. Enable Snapshot Feature Gate in KubeVirt
+```yaml
+kubectl edit kubevirt kubevirt -n kubevirt
+```
+Add to the spec:
+```bash
+spec:
+  configuration:
+    developerConfiguration:
+      featureGates:
+      - Snapshot
+```
+
+## 4. Install `virtctl` CLI
+```bash
+VERSION=$(kubectl get kubevirt.kubevirt.io/kubevirt -n kubevirt -o=jsonpath="{.status.observedKubeVirtVersion}")
+ARCH=$(uname -s | tr A-Z a-z)-$(uname -m | sed 's/x86_64/amd64/') || windows-amd64.exe
+echo ${ARCH}
+curl -L -o virtctl https://github.com/kubevirt/kubevirt/releases/download/${VERSION}/virtctl-${VERSION}-${ARCH}
+chmod +x virtctl
+sudo install virtctl /usr/local/bin
+```
+
+## 5. Install CDI (Containerized Data Importer)
 ```bash
 export TAG=$(curl -s -w %{redirect_url} https://github.com/kubevirt/containerized-data-importer/releases/latest)
 export VERSION=$(echo ${TAG##*/})
@@ -21,25 +48,19 @@ kubectl create -f https://github.com/kubevirt/containerized-data-importer/releas
 ## install CSI driver
 #### I am using rook-ceph for CSI and storageClass
 
-## install VolumeSnapshot CRDs
-Before attempting to install VolumeSnapshot CRDs, it is important to confirm that the CRDs are not already present on the system. To do this, run the following command:
+## 6. Install VolumeSnapshot CRDs
 ```bash
 kubectl api-resources | grep volumesnapshot
 ```
-If CRDs are already present, the output should be similar to the output displayed below. The second column displays the version of the CRD installed (v1beta1 in this case). Ensure that it is the correct version required by the CSI driver being used.
-```bash
-volumesnapshotclasses    snapshot.storage.k8s.io/v1beta1        false        VolumeSnapshotClass
-volumesnapshotcontents   snapshot.storage.k8s.io/v1beta1        false        VolumeSnapshotContent
-volumesnapshots          snapshot.storage.k8s.io/v1beta1        true         VolumeSnapshot
-```
-Installing CRDs
+If missing:
 ```bash
 ##export VS_VERSION=
 kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/refs/heads/release-8.2/client/config/crd/snapshot.storage.k8s.io_volumesnapshotclasses.yaml
 kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/refs/heads/release-8.2/client/config/crd/snapshot.storage.k8s.io_volumesnapshotcontents.yaml
 kubectl apply -f https://raw.githubusercontent.com/kubernetes-csi/external-snapshotter/refs/heads/release-8.2/client/config/crd/snapshot.storage.k8s.io_volumesnapshots.yaml
 ```
-## VolumeSnapshotClass
+## 7. Create VolumeSnapshotClass
+#### Check Storage Plugin Drivers
 ```bash
 kubectl get csidrivers
 NAME                          ATTACHREQUIRED   PODINFOONMOUNT   STORAGECAPACITY   TOKENREQUESTS   REQUIRESREPUBLISH   MODES        AGE
@@ -63,24 +84,14 @@ driver: rook-ceph.cephfs.csi.ceph.com
 deletionPolicy: Delete
 EOF
 ```
-
 ```bash
 kubectl apply -f volumesnapshotclass.yaml
 kubectl get volumesnapshotclass
 ```
-## enable feature gate
+
+## 8. Deploy VM with DataVolume
 ```yaml
-kubectl edit kubevirt kubevirt -n kubevirt
-```
-```bash
-spec:
-  configuration:
-    developerConfiguration:
-      featureGates:
-      - Snapshot
-```
-## deploy a vm
-```yaml
+cat << EOF >> vm.yaml
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -141,11 +152,21 @@ spec:
       source:
         http:
           url: "https://cloud-images.ubuntu.com/focal/current/focal-server-cloudimg-amd64.img"
+EOF
 ```
 ```bash
- virtctl stop vm-ubuntu-datavolume -n test
+kubectl apply -f vm.yaml
+
+# start/stop VM
+virtctl start/stop vm-ubuntu-datavolume -n test
 ```
-## create snapshot object
+## 9. Power Off VM (before snapshot)
+```bash
+virtctl stop vm-ubuntu-datavolume -n test
+kubectl get vms -n test
+# STATUS should be Stopped
+```
+## 10. Create VM Snapshot
 ```yaml
 cat << EOF >> snap-vm.yaml
 apiVersion: snapshot.kubevirt.io/v1beta1
@@ -169,7 +190,7 @@ NAME                        SOURCEKIND       SOURCENAME             PHASE       
 snap-vm-ubuntu-datavolume   VirtualMachine   vm-ubuntu-datavolume   Succeeded   true         87s
 
 ```
-## restore vm
+## 11. Restore VM from Snapshot
 ```bash
 cat << EOF >> restore-vm.yaml
 apiVersion: snapshot.kubevirt.io/v1beta1
@@ -184,4 +205,9 @@ spec:
     name: vm-ubuntu-datavolume
   virtualMachineSnapshotName: snap-vm-ubuntu-datavolume
 EOF
+```
+```bash
+kubectl apply -f restore-vm.yaml
+virtctl start vm-ubuntu-datavolume -n test
+virtctl console vm-ubuntu-datavolume -n test
 ```
